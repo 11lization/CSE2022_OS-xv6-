@@ -362,21 +362,20 @@ scheduler(void)
       }
     }
     else{ //FCFS
-      struct proc *oldP = 0;
+      struct proc * lowp = 0;
 
       for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
         if(p->state != RUNNABLE)
           continue;
 
-        if(oldP == 0)
-          oldP = p;
-        else if(p->pid < oldP->pid)
-          oldP = p;
+        if(lowp == 0)
+          lowp = p;
+        else if(p->pid < lowp->pid)
+          lowp = p;
       }
 
-      if(oldP != 0){
-        p = oldP;
-        p->point = ticks;
+      if(lowp != 0){
+        p = lowp;
         c->proc = p;
         switchuvm(p);
         p->state = RUNNING;
