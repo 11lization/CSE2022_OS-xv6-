@@ -332,6 +332,61 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+#ifdef MULTILEVEL_SCHED
+    int robin = 0;
+    
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+
+      if(p->pid % 2 == 0){
+        robin = 1;
+        break;
+      }
+    }
+
+    if(robin == 1){ //round robin
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state != RUNNABLE)
+          continue;
+        
+        if(p->pid % 2 == 1)
+          continue;
+
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+        c->proc = 0;
+      }
+    }
+    else{ //FCFS
+      struct proc *oldP = 0;
+
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state != RUNNABLE)
+          continue;
+
+        if(oldP == 0)
+          oldP = p;
+        else if(p->pid < oldP->pid)
+          oldP = p;
+      }
+
+      if(oldP != 0){
+        p = oldP;
+        p->point = ticks;
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+        c->proc = 0;
+      }
+    }
+
+#else
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
@@ -350,6 +405,8 @@ scheduler(void)
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+#endif
+
     release(&ptable.lock);
 
   }
@@ -389,6 +446,12 @@ yield(void)
   myproc()->state = RUNNABLE;
   sched();
   release(&ptable.lock);
+}
+
+void
+sys_yield(void)
+{
+  yield();
 }
 
 // A fork child's very first scheduling by scheduler()
