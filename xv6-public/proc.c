@@ -311,6 +311,78 @@ wait(void)
   }
 }
 
+int
+qNumber(void)
+{
+	struct proc *p;
+	int count = 0;
+	int highq = 5;
+	
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+		if(p->pid > 2 && p->state == RUNNABLE && (p->qlev) < highq && p->needToBoost == 0){
+			highq = p->qlev;
+			count++;
+		}
+	}
+	if(count == 0)
+		return -1;
+	return highq;
+}
+
+struct proc*
+selectProcess(int qnum)
+{
+	struct proc *p;
+	struct proc *highp = 0;
+	int priority = 0;
+
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+		if(p->qlev == qnum && p->state == RUNNABLE && p->priority >= priority && p->needToBoost == 0){
+				highp = p;
+        priority = p->priority;
+		}
+	}
+	return highp;
+}
+
+void
+priorityBoost(void)
+{
+	struct proc *p;
+	acquire(&ptable.lock);
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+		if(p->pid > 0 && p->qlev != L0){
+			if(p-> state == RUNNING || p->state == RUNNABLE || p->state == SLEEPING){
+				p->qlev = L0;
+				p->ticks = 0;
+				p->state = RUNNABLE;
+				p->needToBoost = 0;
+			}
+		}
+	}
+	release(&ptable.lock);
+}
+
+void
+mlfqYield(int qLevel)
+{
+  myproc()->qlev = qLevel+1;
+	acquire(&ptable.lock);
+	myproc()->state = RUNNABLE;
+	sched();
+	release(&ptable.lock);
+}
+
+void
+mlfqLowYield(void)
+{
+  myproc()->needToBoost = 1;
+	acquire(&ptable.lock);  //DOC: yieldlock
+  myproc()->state = RUNNABLE;
+  sched();
+  release(&ptable.lock);	
+}
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -322,8 +394,9 @@ wait(void)
 void
 scheduler(void)
 {
+  struct cpu *c;
   struct proc *p;
-  struct cpu *c = mycpu();
+  c = mycpu();
   c->proc = 0;
   
   for(;;){
@@ -332,6 +405,7 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
 #ifdef MULTILEVEL_SCHED
     int robin = 0;
     
@@ -384,6 +458,44 @@ scheduler(void)
         c->proc = 0;
       }
     }
+
+#elif MLFQ_SCHED
+    struct proc *select = 0;
+
+		for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+			if(p->state != RUNNABLE)
+				continue;
+
+			if(p->pid <= 2)				
+        select = p;
+			else{
+        int qnum = qNumber();
+        
+        if(qnum == -1)
+          continue;
+        
+        select = selectProcess(qnum); 
+          
+        if(select->ticks > (4 * qnum + 2)){ 
+          if(qnum != (MLFQ_K - 1)){
+            select->ticks = 0;
+            select->qlev = qnum+1;
+          }
+          else{
+            select->needToBoost = 1;
+            select->state = SLEEPING;
+          }
+          continue;
+      }
+    }
+
+    c->proc = select;
+    switchuvm(select);
+    select->state = RUNNING;
+    swtch(&(c->scheduler), select->context);
+    switchkvm();
+		c->proc = 0;
+	  }
 
 #else
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
@@ -447,10 +559,94 @@ yield(void)
   release(&ptable.lock);
 }
 
-void
+int
 sys_yield(void)
 {
   yield();
+  return 0;
+}
+
+int
+getlev(void)
+{
+	struct proc *p;
+  int lev;
+  p = myproc();
+	lev = p->qlev;
+	return lev;
+}
+
+int
+sys_getlev(void)
+{
+	int lev;
+	lev = getlev();
+	return lev;	
+}
+
+// int
+// setpriority(int pid, int priority)
+// {
+//   if(priority < 0 && priority > 10) 
+//     return -2;
+
+//   struct proc *child = 0;
+//   struct proc *p;
+//   acquire(&ptable.lock);
+
+//   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+//     if(p->pid == pid) {
+//       child = p;
+//       break;
+//     }
+//   }
+
+//   if(child != 0) {
+//     if(child->parent->pid == myproc()->pid) {
+//       child->priority = priority;
+//       return 0;
+//     }
+//   }
+
+//   release(&ptable.lock);
+//   return -1;
+// }
+
+int
+setpriority(int pid, int priority)
+{
+  struct proc *curp;
+  struct proc *p;
+  int retVal = -1;
+
+  curp = myproc();
+  	 
+  if(priority < 0 || priority > 10)
+    return -2;
+    
+  acquire(&ptable.lock);
+    
+  for(p = ptable.proc; p< &ptable.proc[NPROC]; p++){
+    if(pid > 0 && p->pid == pid && curp->pid == p->parent->pid){
+      retVal = 0;
+      break;
+    }
+  }
+  
+  if(retVal == 0)
+    p->priority = priority;
+  
+  release(&ptable.lock);
+  return retVal;
+}
+
+int
+sys_setpriority(void)
+{
+    int pid, priority;
+    if(argint(0, &pid) < 0 || argint(1, &priority) < 0)
+	      return -1; 
+    return setpriority(pid, priority);
 }
 
 // A fork child's very first scheduling by scheduler()

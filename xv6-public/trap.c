@@ -13,6 +13,11 @@ struct gatedesc idt[256];
 extern uint vectors[];  // in vectors.S: array of 256 entry pointers
 struct spinlock tickslock;
 uint ticks;
+extern enum qLevel qlev;
+int quantum[5]={ 2, 6, 10, 14, 18};
+extern void priorityBoost(void);
+extern void mlfqYield(int);
+extern void mlfqLowYield(void);
 
 void
 tvinit(void)
@@ -52,6 +57,8 @@ trap(struct trapframe *tf)
       acquire(&tickslock);
       ticks++;
       wakeup(&ticks);
+      if(myproc())
+	  	  myproc()->ticks++;
       release(&tickslock);
     }
     lapiceoi();
@@ -94,6 +101,32 @@ trap(struct trapframe *tf)
     myproc()->killed = 1;
   }
 
+#ifdef MLFQ_SCHED
+	  
+	if((ticks%100) == 0 && tf->trapno == T_IRQ0 + IRQ_TIMER){
+		priorityBoost();
+	}
+
+	else{
+  		for(int i = 0 ; i <= MLFQ_K - 1 ; i++){
+	  
+	  		if(i == MLFQ_K - 1){	  
+	  			if(myproc() && myproc()->state == RUNNING && myproc()->qlev == i && myproc()->ticks > quantum[i] && tf->trapno == T_IRQ0 + IRQ_TIMER){
+					  myproc()->ticks = 0;
+		  			mlfqLowYield();
+  	  			}
+	  		}	
+
+
+	  		else if(myproc() && myproc()->state == RUNNING  && myproc()->qlev == i && myproc()->ticks > quantum[i] && tf->trapno == T_IRQ0 + IRQ_TIMER){
+				  myproc()->ticks = 0;
+		  		mlfqYield(i);
+  	  	}
+  		}
+	}
+ 
+#endif
+
   // Force process exit if it has been killed and is in user space.
   // (If it is still executing in the kernel, let it keep running
   // until it gets to the regular system call return.)
@@ -110,3 +143,5 @@ trap(struct trapframe *tf)
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
     exit();
 }
+
+

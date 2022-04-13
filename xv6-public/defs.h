@@ -120,6 +120,8 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+int             getlev(void);
+int             setpriority(int, int);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
@@ -191,5 +193,6 @@ void            clearpteu(pde_t *pgdir, char *uva);
 int				myfunction(char*);
 //getppid.c
 int             getppid(void);
+
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
