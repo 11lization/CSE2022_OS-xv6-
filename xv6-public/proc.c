@@ -15,6 +15,7 @@ struct {
 static struct proc *initproc;
 
 int nextpid = 1;
+int nexttid = 1;
 extern void forkret(void);
 extern void trapret(void);
 
@@ -88,6 +89,10 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->master = p;
+  p->tid = 0;
+  p->front = 0;
+  p->rear = 0;
 
   release(&ptable.lock);
 
@@ -159,6 +164,7 @@ int
 growproc(int n)
 {
   uint sz;
+  struct proc *p;
   struct proc *curproc = myproc();
 
   sz = curproc->sz;
@@ -169,6 +175,17 @@ growproc(int n)
     if((sz = deallocuvm(curproc->pgdir, sz, sz + n)) == 0)
       return -1;
   }
+
+  acquire(&ptable.lock);
+
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if(p->pid == 0)
+			continue;
+		if(curproc->pid == p->pid)
+			p->sz = sz;
+	}
+
+	release(&ptable.lock);
   curproc->sz = sz;
   switchuvm(curproc);
   return 0;
@@ -180,7 +197,47 @@ growproc(int n)
 int
 fork(void)
 {
+  // int i, pid;
+  // struct proc *np;
+  // struct proc *curproc = myproc();
+
+  // // Allocate process.
+  // if((np = allocproc()) == 0){
+  //   return -1;
+  // }
+
+  // // Copy process state from proc.
+  // if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
+  //   kfree(np->kstack);
+  //   np->kstack = 0;
+  //   np->state = UNUSED;
+  //   return -1;
+  // }
+  // np->sz = curproc->sz;
+  // np->parent = curproc;
+  // *np->tf = *curproc->tf;
+
+  // // Clear %eax so that fork returns 0 in the child.
+  // np->tf->eax = 0;
+
+  // for(i = 0; i < NOFILE; i++)
+  //   if(curproc->ofile[i])
+  //     np->ofile[i] = filedup(curproc->ofile[i]);
+  // np->cwd = idup(curproc->cwd);
+
+  // safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  // pid = np->pid;
+
+  // acquire(&ptable.lock);
+
+  // np->state = RUNNABLE;
+
+  // release(&ptable.lock);
+
+  // return pid;
   int i, pid;
+  struct proc *p;
   struct proc *np;
   struct proc *curproc = myproc();
 
@@ -196,9 +253,23 @@ fork(void)
     np->state = UNUSED;
     return -1;
   }
+	
+  acquire(&ptable.lock);
+	
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if((p->pid == curproc->pid) && (p->tid != curproc->tid)) {
+			deallocuvm(np->pgdir, p->addr + 2 * PGSIZE, p->addr);
+			np->tcircle[np->rear] = p->addr;
+			np->rear = (np->rear + 1) % NPROC;
+		}
+	}
+	
+  release(&ptable.lock);
+
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  np->addr = curproc->addr;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -227,13 +298,43 @@ fork(void)
 void
 exit(void)
 {
+  // struct proc *curproc = myproc();
+  // int fd;
+
+  // curproc->retval = retval;
+
+  // if(curproc == initproc)
+  //   panic("init exiting");
+
+  // // Close all open files.
+  // for(fd = 0; fd < NOFILE; fd++){
+  //   if(curproc->ofile[fd]){
+  //     fileclose(curproc->ofile[fd]);
+  //     curproc->ofile[fd] = 0;
+  //   }
+  // }
+
+  // begin_op();
+  // iput(curproc->cwd);
+  // end_op();
+  // curproc->cwd = 0;
+
+  // acquire(&ptable.lock);
+
+  // // Parent might be sleeping in wait().
+  // wakeup1(curproc->parent);
+
+  // // Jump into the scheduler, never to return.
+  // curproc->state = ZOMBIE;
+  // sched();
+  // panic("zombie exit");
   struct proc *curproc = myproc();
   struct proc *p;
   int fd;
 
   if(curproc == initproc)
     panic("init exiting");
-
+	
   // Close all open files.
   for(fd = 0; fd < NOFILE; fd++){
     if(curproc->ofile[fd]){
@@ -241,6 +342,21 @@ exit(void)
       curproc->ofile[fd] = 0;
     }
   }
+
+  acquire(&ptable.lock);
+	
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if(curproc->pid == p->pid && curproc != p) {
+			kfree(p->kstack);
+      p->state = UNUSED;
+			p->kstack = 0;
+			p->pid = 0;
+			p->parent = 0;
+			p->killed = 0;
+		}
+	}
+	
+  release(&ptable.lock);
 
   begin_op();
   iput(curproc->cwd);
@@ -789,4 +905,232 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+int
+thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
+{
+	int i;
+	uint sz, sp, ustack[2];
+	pde_t *pgdir;
+	struct proc *np;
+	struct proc *curproc = myproc();
+
+	if(curproc->master != curproc) {
+		return -1;
+	}
+
+  // Allocate process.
+	if((np = allocproc()) == 0) {
+		return -1;
+	}
+
+	pgdir = curproc->pgdir;
+
+	if(pgdir == 0) {
+		np->state = UNUSED;
+		return -1;
+	}
+
+  np->sz = curproc->sz;
+  np->master = curproc;
+	np->parent = curproc->parent;
+	*np->tf = *curproc->tf;
+  np->tf->eax = 0;
+	np->pid = curproc->pid;
+	np->tid = nexttid++;
+
+	for(i = 0; i < NOFILE; i++)
+		if(curproc->ofile[i])
+			np->ofile[i] = filedup(curproc->ofile[i]);
+	np->cwd = idup(curproc->cwd);
+
+	safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  //
+
+	if(curproc->front == curproc->rear) {
+		sz = curproc->sz;	
+	} else {
+		sz = curproc->tcircle[curproc->front];
+	}
+	if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0) {
+		goto bad;
+	}
+	clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+	sp = sz;
+
+	ustack[0] = 0xffffffff;
+	ustack[1] = (uint)arg;
+	sp -= 8;
+	if(copyout(pgdir, sp, ustack, 2 * 4) < 0)
+		goto bad;
+	
+	if(curproc->front == curproc->rear) {
+		curproc->sz = sz;
+	} else {
+		curproc->front = (curproc->front + 1) % NPROC;
+	}
+  np->addr = sz - 2*PGSIZE;
+  np->pgdir = pgdir;
+	np->sz = curproc->sz;
+	np->tf->eip = (uint)start_routine;
+	np->tf->esp = sp;
+
+	*thread = np->tid;
+
+	acquire(&ptable.lock);
+
+	np->state = RUNNABLE;
+
+	release(&ptable.lock);
+
+	return 0;
+
+bad :
+	np->state = UNUSED;
+	return -1;
+}
+
+int
+sys_thread_create(void)
+{
+	int thread, start_routine, arg;
+
+	if(argint(0, &thread) < 0 || argint(1, &start_routine) < 0 || argint(2, &arg) < 0)
+		return -1;
+
+	return thread_create((thread_t*)thread, (void*)start_routine, (void*)arg);
+}
+
+void
+thread_exit(void *retval)
+{
+  int fd;
+  struct proc *curproc = myproc();
+
+	if(curproc->tid == 0) {
+		return;
+	}
+
+	curproc->retval = retval;
+
+	for(fd = 0; fd < NOFILE; fd++) {
+		if(curproc->ofile[fd]) {
+			fileclose(curproc->ofile[fd]);
+			curproc->ofile[fd] = 0;
+		}
+	}
+	
+	begin_op();
+	iput(curproc->cwd);
+	end_op();
+	curproc->cwd = 0;
+
+	acquire(&ptable.lock);
+
+	wakeup1(curproc->master);
+
+	curproc->state = ZOMBIE;
+	
+	sched();
+	panic("zombie exit");
+
+}
+
+void
+sys_thread_exit(void)
+{
+	int retval;
+
+	if(argint(0, &retval) < 0)
+		return;
+
+	thread_exit((void*)retval);
+	return;
+}
+
+int
+thread_join(thread_t thread, void **retval)
+{
+	struct proc *p;
+	int havekids, addr;
+  struct proc *curproc = myproc();
+
+	if(curproc->tid != 0) {
+		return -1;
+	}
+
+	acquire(&ptable.lock);
+	for(;;){
+    // Scan through table looking for exited children.
+		havekids = 0;
+		for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+			if(p->master != curproc || p->tid != thread)
+				continue;
+			havekids = 1;
+			if(p->state == ZOMBIE){
+        // Found one.
+				kfree(p->kstack);
+				p->kstack = 0;
+        p->state = UNUSED;
+				p->pid = 0;
+				p->parent = 0;
+				p->killed = 0;
+        p->name[0] = 0;
+				p->master = 0;
+				p->tid = 0;
+        addr = p->addr;
+				p->addr = 0;
+        *retval = p->retval;
+				deallocuvm(p->pgdir, addr + 2 * PGSIZE, addr);
+
+				release(&ptable.lock);
+
+				curproc->tcircle[curproc->rear] = addr;
+				curproc->rear = (curproc->rear + 1) % NPROC;				
+
+				return 0;
+			}
+		}
+
+		if(!havekids || curproc->killed) {
+			cprintf("error\n");
+			release(&ptable.lock);
+			return -1;
+		}
+
+		sleep(curproc, &ptable.lock);
+	}
+}
+
+int
+sys_thread_join(void)
+{
+	int thread, retval;
+
+	if(argint(0, &thread) < 0 || argint(1, &retval) < 0)
+		return -1;
+
+	return thread_join((thread_t)thread, (void**)retval);
+}
+
+void
+texit(int pid, int tid) {
+	struct proc *p;
+		
+	acquire(&ptable.lock);
+	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+		if(pid == 0)
+			continue;
+		if(p->pid == pid && p->tid != tid) {
+			kfree(p->kstack);
+      p->kstack = 0;
+			p->pid = 0;
+			p->parent = 0;
+			p->killed = 0;
+      p->state = UNUSED;
+		}
+	}
+	release(&ptable.lock);
 }

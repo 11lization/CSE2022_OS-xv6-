@@ -54,6 +54,13 @@ struct proc {
   int priority;
   uint ticks;
   int needToBoost;
+  struct proc *master;
+  int tid;
+  int front;
+  int rear;
+  void *retval;
+  uint addr;
+  uint tcircle[NPROC];
 };
 
 // Process memory is laid out contiguously, low addresses first:
