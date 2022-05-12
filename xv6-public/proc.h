@@ -60,7 +60,7 @@ struct proc {
   int rear;
   void *retval;
   uint addr;
-  uint tcircle[NPROC];
+  uint tcircle[NPROC+1];
 };
 
 // Process memory is laid out contiguously, low addresses first:

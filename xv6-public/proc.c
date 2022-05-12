@@ -266,10 +266,10 @@ fork(void)
 	
   release(&ptable.lock);
 
+  np->addr = curproc->addr;
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
-  np->addr = curproc->addr;
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -348,11 +348,12 @@ exit(void)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
 		if(curproc->pid == p->pid && curproc != p) {
 			kfree(p->kstack);
-      p->state = UNUSED;
 			p->kstack = 0;
 			p->pid = 0;
 			p->parent = 0;
 			p->killed = 0;
+      p->name[0] = 0;
+      p->state = UNUSED;
 		}
 	}
 	
@@ -910,11 +911,12 @@ procdump(void)
 int
 thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
 {
-	int i;
-	uint sz, sp, ustack[2];
-	pde_t *pgdir;
 	struct proc *np;
 	struct proc *curproc = myproc();
+  int i;
+	uint sz, sp, ustack[2];
+	pde_t *pgdir;
+
 
 	if(curproc->master != curproc) {
 		return -1;
@@ -932,13 +934,8 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
 		return -1;
 	}
 
-  np->sz = curproc->sz;
-  np->master = curproc;
 	np->parent = curproc->parent;
 	*np->tf = *curproc->tf;
-  np->tf->eax = 0;
-	np->pid = curproc->pid;
-	np->tid = nexttid++;
 
 	for(i = 0; i < NOFILE; i++)
 		if(curproc->ofile[i])
@@ -946,6 +943,18 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
 	np->cwd = idup(curproc->cwd);
 
 	safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+  acquire(&ptable.lock);
+
+  np->pid = curproc->pid;
+
+  np->tid = nexttid++;
+
+  np->master = curproc;
+
+  np->tf->eax = 0;
+
+  release(&ptable.lock);
 
   //
 
@@ -963,15 +972,17 @@ thread_create(thread_t *thread, void *(*start_routine)(void *), void *arg)
 	ustack[0] = 0xffffffff;
 	ustack[1] = (uint)arg;
 	sp -= 8;
+  np->addr = sz - 2*PGSIZE;
 	if(copyout(pgdir, sp, ustack, 2 * 4) < 0)
 		goto bad;
 	
 	if(curproc->front == curproc->rear) {
 		curproc->sz = sz;
 	} else {
-		curproc->front = (curproc->front + 1) % NPROC;
+    curproc->sz = curproc->sz;
+		curproc->front = (curproc->front + 1) % (NPROC+1);
 	}
-  np->addr = sz - 2*PGSIZE;
+
   np->pgdir = pgdir;
 	np->sz = curproc->sz;
 	np->tf->eip = (uint)start_routine;
@@ -1073,11 +1084,11 @@ thread_join(thread_t thread, void **retval)
         // Found one.
 				kfree(p->kstack);
 				p->kstack = 0;
-        p->state = UNUSED;
 				p->pid = 0;
 				p->parent = 0;
 				p->killed = 0;
         p->name[0] = 0;
+        p->state = UNUSED;
 				p->master = 0;
 				p->tid = 0;
         addr = p->addr;
@@ -1088,7 +1099,7 @@ thread_join(thread_t thread, void **retval)
 				release(&ptable.lock);
 
 				curproc->tcircle[curproc->rear] = addr;
-				curproc->rear = (curproc->rear + 1) % NPROC;				
+				curproc->rear = (curproc->rear + 1) % (NPROC+1);				
 
 				return 0;
 			}
@@ -1129,6 +1140,7 @@ texit(int pid, int tid) {
 			p->pid = 0;
 			p->parent = 0;
 			p->killed = 0;
+      p->name[0] = 0;
       p->state = UNUSED;
 		}
 	}
